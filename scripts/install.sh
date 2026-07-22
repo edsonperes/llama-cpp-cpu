@@ -10,6 +10,15 @@
 # =============================================================================
 set -euo pipefail
 
+# Resolvido AQUI, antes de qualquer 'cd'. BASH_SOURCE costuma ser relativo
+# ("./scripts/install.sh"), entao calcular isto depois de mudar de diretorio
+# aponta para um caminho que nao existe. Quando isso acontecia, a condicao que
+# guardava a etapa da WebUI dava falso e o bloco inteiro era PULADO em silencio:
+# o script terminava com exit 0 anunciando "Instalacao concluida" e o servidor
+# subia com a UI padrao do llama.cpp, sem login, sem gestao de usuarios e sem
+# tokens de API.
+ASSETS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 PREFIX="${PREFIX:-/opt/llama}"
 BUILD_DIR="${BUILD_DIR:-/opt/llama/src}"
 JOBS="${JOBS:-$(nproc)}"
@@ -66,32 +75,46 @@ echo "  commit: $(git rev-parse --short HEAD)"
 # --- 3) WebUI: traduzir para PT-BR antes de compilar -------------------------
 # O bundle da WebUI e embutido no binario do llama-server, entao as
 # customizacoes precisam ser aplicadas ANTES do build.
-ASSETS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-if [ -d tools/ui/src ] && [ -f "$ASSETS_DIR/i18n/translate.sh" ]; then
-    log "Aplicando WebUI em portugues..."
-    # SEM '|| true' aqui, de proposito. O apply.pl sai com codigo != 0 quando
-    # algum patch nao casa (tipicamente porque o upstream mexeu na WebUI), e
-    # engolir esse erro foi exatamente o que fez tres versoes irem pro ar sem os
-    # botoes de Endpoints/Usuarios/SSH/Sair, sem ninguem perceber. Com o
-    # 'set -euo pipefail' do topo, a falha aborta a instalacao -- que e o
-    # comportamento certo: melhor nao instalar do que instalar uma UI quebrada.
-    if [ -f "$ASSETS_DIR/customizations/apply.pl" ]; then
-        perl "$ASSETS_DIR/customizations/apply.pl" tools/ui/src
-    fi
-    sed -i 's/\r$//' "$ASSETS_DIR/i18n/translate.sh"
-    bash "$ASSETS_DIR/i18n/translate.sh" tools/ui/src "$ASSETS_DIR/i18n/pt-br.txt"
-    if command -v npm >/dev/null 2>&1; then
-        # Idem: um build que falha nao pode virar "seguindo com a UI padrao".
-        # A UI e compilada dentro de libllama-server-impl.so; se o build quebrar
-        # e a instalacao continuar, o servidor sobe servindo o bundle antigo e o
-        # sintoma aparece so depois, dificil de rastrear.
-        (cd tools/ui && npm ci --silent && npm run build --silent)
-    else
-        die "npm nao encontrado. A WebUI customizada (login, gestao de usuarios,
-       tokens de API) e compilada aqui -- sem Node 20+ o servidor subiria com a
-       UI padrao do llama.cpp, sem nada disso. Instale Node 20+ e rode de novo."
-    fi
-fi
+log "Aplicando WebUI em portugues..."
+# Cada pre-requisito e checado com die(), NUNCA com um 'if' que apenas pula. Um
+# bloco pulado em silencio foi o que fez esta etapa inteira sumir de uma
+# instalacao que mesmo assim terminou com exit 0 e a mensagem "Instalacao
+# concluida" -- e so muito depois se descobre que a UI subiu sem login.
+[ -d tools/ui/src ] || die "tools/ui/src nao existe em $(pwd) -- o checkout do
+       llama.cpp falhou ou o upstream mudou o layout do repositorio."
+[ -f "$ASSETS_DIR/i18n/translate.sh" ] || die "nao achei $ASSETS_DIR/i18n/translate.sh
+       -- ASSETS_DIR ficou errado (esperado: a raiz deste repositorio)."
+[ -f "$ASSETS_DIR/customizations/apply.pl" ] || die "nao achei
+       $ASSETS_DIR/customizations/apply.pl -- sem ele a WebUI sai sem os botoes
+       de Endpoints/Usuarios/SSH/Sair e sem o controle de admin."
+command -v npm >/dev/null 2>&1 || die "npm nao encontrado. A WebUI customizada
+       (login, gestao de usuarios, tokens de API) e compilada aqui -- sem Node
+       20+ o servidor subiria com a UI padrao do llama.cpp, sem nada disso."
+
+# SEM '|| true' em nenhuma linha abaixo, de proposito. O apply.pl sai com codigo
+# != 0 quando algum patch nao casa (tipicamente porque o upstream mexeu na
+# WebUI), e engolir esse erro foi exatamente o que fez tres versoes irem pro ar
+# sem os botoes, sem ninguem perceber. Com 'set -euo pipefail', a falha aborta a
+# instalacao -- melhor nao instalar do que instalar uma UI quebrada.
+perl "$ASSETS_DIR/customizations/apply.pl" tools/ui/src
+sed -i 's/\r$//' "$ASSETS_DIR/i18n/translate.sh"
+bash "$ASSETS_DIR/i18n/translate.sh" tools/ui/src "$ASSETS_DIR/i18n/pt-br.txt"
+# A UI e compilada dentro de libllama-server-impl.so; se o build quebrar e a
+# instalacao continuar, o servidor sobe servindo o bundle antigo e o sintoma
+# aparece so depois, dificil de rastrear.
+(cd tools/ui && npm ci --silent && npm run build --silent)
+
+# Prova de que a customizacao realmente entrou no bundle, em vez de confiar que
+# os passos acima "devem ter funcionado". Este e o unico teste que importa: o
+# usuario ve o bundle, nao o codigo-fonte patchado.
+BUNDLE=$(ls tools/ui/dist/_app/immutable/bundle.*.js 2>/dev/null | head -1)
+[ -n "$BUNDLE" ] || die "o build da WebUI nao gerou bundle em tools/ui/dist."
+for marcador in "Endpoints da API" "Servidores SSH"; do
+    grep -q "$marcador" "$BUNDLE" || die "o bundle gerado nao contem
+       \"$marcador\". Os patches aplicaram mas nao chegaram na saida --
+       nao instale assim, a UI ficaria sem gestao de usuarios/API."
+done
+echo "  WebUI: patches + traducao OK, marcadores presentes no bundle"
 
 # --- 4) compilar ------------------------------------------------------------
 # GGML_NATIVE=ON  -> usa -march=native, habilita AVX-512 desta CPU
