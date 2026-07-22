@@ -6,31 +6,30 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/opt/llama/llama.env
+Environment=LD_LIBRARY_PATH=/opt/llama/lib
 
-# numactl prende o processo a UM no NUMA. Isso e essencial num servidor de 2
-# sockets: acesso cross-socket via UPI derruba a banda de memoria, que e o
-# gargalo da geracao em CPU. Medicoes publicas mostram dual-socket indo de +8%
-# a -70% na geracao — nao vale o risco como padrao.
-# Rode o benchmark (scripts/bench.sh) antes de considerar mudar isso.
+# threads (geracao) < threads-batch (prompt) de proposito: medido nesta maquina,
+# a geracao e limitada por banda de memoria e satura com ~10 threads (11.37 tok/s
+# contra 10.95 com 20), enquanto o prompt e compute-bound e escala com cores
+# (80.4 tok/s com 20 contra 51.3 com 10). Separar os dois pega o melhor de cada.
+#
+# numactl prende a UM socket: medido, usar os 2 sockets DERRUBA a geracao pela
+# metade (4.67 vs 10.87 tok/s) por custo de sincronizacao via UPI.
 ExecStart=/usr/bin/numactl --cpunodebind=${NUMA_NODE} --membind=${NUMA_NODE} \
     /opt/llama/bin/llama-server \
     --model ${MODEL} \
     --threads ${THREADS} \
+    --threads-batch ${THREADS_BATCH} \
     --ctx-size ${CTX_SIZE} \
     --numa numactl \
     --no-mmap \
-    --host 127.0.0.1 --port 8081 \
-    ${EXTRA_ARGS}
+    --jinja \
+    --host 127.0.0.1 --port 8081
 
-Environment=LD_LIBRARY_PATH=/opt/llama/lib
 WorkingDirectory=/opt/llama
-
 Restart=on-failure
 RestartSec=10
-# modelo grande demora a carregar do disco na primeira vez
-TimeoutStartSec=600
-
-# limites: MoE grande usa muita RAM residente (--no-mmap aloca de verdade)
+TimeoutStartSec=900
 LimitNOFILE=65536
 LimitMEMLOCK=infinity
 

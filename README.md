@@ -43,7 +43,23 @@ Acesse `http://IP-DO-CONTAINER:8080` e entre com o usuário/senha do `llama.env`
 
 ---
 
-## Medir antes de otimizar
+## Resultados medidos (2x Xeon Gold 6138, 4 canais DDR4-2400)
+
+| Config | Prompt (pp512) | Geração (tg128) |
+|---|---|---|
+| **1 socket, 10 threads** | 51,3 | **11,37** |
+| 1 socket, 14 threads | 62,1 | 11,04 |
+| 1 socket, 20 threads | **80,4** | 10,95 |
+| 2 sockets, 40 threads | 67,2 | **4,67** (metade!) |
+
+Duas conclusões viraram a configuração padrão:
+
+1. **Um socket só.** Usar os dois **derruba a geração pela metade** — o custo de
+   sincronização entre threads via UPI supera o ganho de banda.
+2. **Threads separadas.** `--threads 10` para geração (satura a banda de memória
+   cedo) e `--threads-batch 20` para prompt (escala com cores).
+
+## Medir na sua máquina
 
 ```bash
 ./scripts/bench.sh
