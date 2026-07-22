@@ -13,7 +13,14 @@ set -euo pipefail
 PREFIX="${PREFIX:-/opt/llama}"
 BUILD_DIR="${BUILD_DIR:-/opt/llama/src}"
 JOBS="${JOBS:-$(nproc)}"
-LLAMA_REF="${LLAMA_REF:-master}"
+# Commit FIXO do llama.cpp -- NAO trocar por "master". O upstream muda depressa e
+# reorganiza a WebUI: em 2026-07-07 ele deletou o DesktopIconStrip.svelte e 15 dos
+# nossos patches pararam de casar, o que da tela branca no login. Com o commit
+# fixado, reinstalar reproduz exatamente o que ja foi testado.
+# Para atualizar: troque o SHA e rode ./scripts/install.sh -- o apply.pl aborta se
+# algum patch nao casar, entao um SHA incompativel falha alto em vez de gerar uma
+# UI quebrada. Depois de validar, comite o SHA novo.
+LLAMA_REF="${LLAMA_REF:-0278d8362d78c5de291bc03b76016f7f74b2ab77}"
 
 log() { echo -e "\n\033[1;36m[install]\033[0m $*"; }
 die() { echo -e "\n\033[1;31m[erro]\033[0m $*" >&2; exit 1; }
@@ -43,13 +50,16 @@ echo "  ok"
 # --- 2) llama.cpp: clonar e compilar ----------------------------------------
 log "Obtendo llama.cpp (${LLAMA_REF})..."
 mkdir -p "$BUILD_DIR"
-if [ -d "$BUILD_DIR/llama.cpp/.git" ]; then
-    git -C "$BUILD_DIR/llama.cpp" fetch --depth 1 origin "$LLAMA_REF" -q
-    git -C "$BUILD_DIR/llama.cpp" checkout -q FETCH_HEAD
-else
-    git clone --depth 1 --branch "$LLAMA_REF" -q \
-        https://github.com/ggml-org/llama.cpp.git "$BUILD_DIR/llama.cpp"
+# fetch de um commit especifico. Nao usar 'git clone --branch': ele so aceita
+# branch ou tag, nunca um SHA.
+if [ ! -d "$BUILD_DIR/llama.cpp/.git" ]; then
+    mkdir -p "$BUILD_DIR/llama.cpp"
+    git -C "$BUILD_DIR/llama.cpp" init -q
+    git -C "$BUILD_DIR/llama.cpp" remote add origin \
+        https://github.com/ggml-org/llama.cpp.git
 fi
+git -C "$BUILD_DIR/llama.cpp" fetch --depth 1 -q origin "$LLAMA_REF"
+git -C "$BUILD_DIR/llama.cpp" checkout -q FETCH_HEAD
 cd "$BUILD_DIR/llama.cpp"
 echo "  commit: $(git rev-parse --short HEAD)"
 
@@ -59,16 +69,27 @@ echo "  commit: $(git rev-parse --short HEAD)"
 ASSETS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [ -d tools/ui/src ] && [ -f "$ASSETS_DIR/i18n/translate.sh" ]; then
     log "Aplicando WebUI em portugues..."
-    [ -f "$ASSETS_DIR/customizations/apply.pl" ] && \
-        perl "$ASSETS_DIR/customizations/apply.pl" tools/ui/src || true
+    # SEM '|| true' aqui, de proposito. O apply.pl sai com codigo != 0 quando
+    # algum patch nao casa (tipicamente porque o upstream mexeu na WebUI), e
+    # engolir esse erro foi exatamente o que fez tres versoes irem pro ar sem os
+    # botoes de Endpoints/Usuarios/SSH/Sair, sem ninguem perceber. Com o
+    # 'set -euo pipefail' do topo, a falha aborta a instalacao -- que e o
+    # comportamento certo: melhor nao instalar do que instalar uma UI quebrada.
+    if [ -f "$ASSETS_DIR/customizations/apply.pl" ]; then
+        perl "$ASSETS_DIR/customizations/apply.pl" tools/ui/src
+    fi
     sed -i 's/\r$//' "$ASSETS_DIR/i18n/translate.sh"
-    bash "$ASSETS_DIR/i18n/translate.sh" tools/ui/src "$ASSETS_DIR/i18n/pt-br.txt" || true
+    bash "$ASSETS_DIR/i18n/translate.sh" tools/ui/src "$ASSETS_DIR/i18n/pt-br.txt"
     if command -v npm >/dev/null 2>&1; then
-        (cd tools/ui && npm ci --silent && npm run build --silent) || \
-            echo "  aviso: build da WebUI falhou, seguindo com a UI padrao"
+        # Idem: um build que falha nao pode virar "seguindo com a UI padrao".
+        # A UI e compilada dentro de libllama-server-impl.so; se o build quebrar
+        # e a instalacao continuar, o servidor sobe servindo o bundle antigo e o
+        # sintoma aparece so depois, dificil de rastrear.
+        (cd tools/ui && npm ci --silent && npm run build --silent)
     else
-        echo "  aviso: npm nao encontrado, WebUI ficara em ingles"
-        echo "         (instale Node 20+ e rode de novo se quiser PT-BR)"
+        die "npm nao encontrado. A WebUI customizada (login, gestao de usuarios,
+       tokens de API) e compilada aqui -- sem Node 20+ o servidor subiria com a
+       UI padrao do llama.cpp, sem nada disso. Instale Node 20+ e rode de novo."
     fi
 fi
 

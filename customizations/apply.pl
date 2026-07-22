@@ -23,11 +23,44 @@ die "Diretorio nao existe: $webui_src\n" unless -d $webui_src;
 
 print "Aplicando customizacoes em $webui_src\n";
 
+# ---------------------------------------------------------------------------
+# Contadores globais.
+#
+# Historico: ate 2026-07 um patch que nao casava so emitia warn e o build
+# seguia, publicando uma imagem degradada sem ninguem perceber (aconteceu nas
+# 1.0.19/1.0.20/1.0.21, com 15 patches quebrados por duas semanas). Agora o
+# script conta as falhas e sai com codigo != 0 no fim, quebrando o docker
+# build em vez de publicar lixo.
+#
+# Um patch legitimamente opcional deve ser marcado passando OPTIONAL como 5o
+# argumento de patch_file(). Ele avisa mas NAO entra na conta de falhas.
+# O default e CRITICO.
+# ---------------------------------------------------------------------------
+use constant OPTIONAL => 1;
+
+my $applied = 0;
+my $failed  = 0;
+my @failures;
+my @skipped_optional;
+
 sub patch_file {
-    my ($file, $pattern, $replacement, $description) = @_;
-    unless (-f $file) {
-        warn "  ! $description: arquivo nao encontrado $file\n";
+    my ($file, $pattern, $replacement, $description, $optional) = @_;
+
+    my $fail = sub {
+        my ($reason) = @_;
+        if ($optional) {
+            warn "  ~ $description: $reason (OPCIONAL, ignorado)\n";
+            push @skipped_optional, $description;
+        } else {
+            warn "  ! $description: $reason\n";
+            $failed++;
+            push @failures, $description;
+        }
         return 0;
+    };
+
+    unless (-f $file) {
+        return $fail->("arquivo nao encontrado $file");
     }
     open(my $in, '<:encoding(UTF-8)', $file) or die "Cannot read $file: $!";
     local $/;
@@ -46,11 +79,11 @@ sub patch_file {
         print $out $content;
         close $out;
         print "  + $description\n";
+        $applied++;
         return 1;
-    } else {
-        warn "  ! $description: padrao nao encontrado em $file\n";
-        return 0;
     }
+
+    return $fail->("padrao nao encontrado em $file");
 }
 
 # Cria (ou sobrescreve) um arquivo novo
@@ -60,6 +93,7 @@ sub write_file {
     print $out $content;
     close $out;
     print "  + $description\n";
+    $applied++;
     return 1;
 }
 
@@ -674,50 +708,48 @@ print "\n[4] Botao Endpoints no menu lateral...\n";
 
 my $sidebar_actions = "$webui_src/lib/components/app/navigation/SidebarNavigation/SidebarNavigationActions.svelte";
 
-# 4.1: Substituir o script todo para adicionar estado do modal e helpers
+# ---------------------------------------------------------------------------
+# 4.1 / 4.2 - REESCRITOS (upstream 2026-07-07 reorganizou a navegacao).
+#
+# O DesktopIconStrip.svelte foi deletado e o seu conteudo virou o branch
+# {:else} deste mesmo SidebarNavigationActions.svelte, que hoje tem 3 ramos:
+#   {#if isSearchModeActive}                -> SearchInput
+#   {:else if isExpandedMode || isOnMobile} -> menu expandido (botoes COM TEXTO)
+#   {:else}                                 -> icon strip (botoes SO ICONE)
+#
+# O 4.1 antigo substituia o <script> INTEIRO por um bloco escrito para a API
+# antiga do componente. Ele casava (nao warnava!) e apagava do upstream
+# ICON_CLASS_DEFAULT/goto/Search/ActionIcon/isMobile/TooltipSide/fade/circIn/
+# ROUTES/initialized/showIcons/isItemActive/isExpandedMode/isOnMobile/
+# onNewChat/onSearchClick - todos usados no template. Era o estrago real e
+# nao aparecia em nenhum warn. Agora 4.1a/4.1b apenas INSEREM, deixando o
+# script do upstream intacto.
+# ---------------------------------------------------------------------------
+# ---- 4.1a imports
 patch_file(
     $sidebar_actions,
-    qr/<script lang="ts">.*?<\/script>/s,
-    q{<script lang="ts">
-	import { KeyboardShortcutInfo } from '$lib/components/app';
-	import { Button } from '$lib/components/ui/button';
-	import type { Component } from 'svelte';
-	import { SearchInput } from '$lib/components/app';
-	import { page } from '$app/state';
-	import { SIDEBAR_ACTIONS_ITEMS } from '$lib/constants/ui';
+    qr{(import type \{ Component \} from 'svelte';)(?!\s*import \{ Dialog as DialogPrimitive \})},
+    sub { $1 . q{
 	import { Dialog as DialogPrimitive } from 'bits-ui';
 	import { Plug, Copy, Check, X as XIcon, UserPlus, Trash2, LogOut, Server } from '@lucide/svelte';
-	import { onMount } from 'svelte';
 	import { previewCoordinator } from '$lib/stores/preview-coordinator.svelte';
-	import { sidebarPanels } from '$lib/stores/sidebar-panels.svelte';
+	import { sidebarPanels } from '$lib/stores/sidebar-panels.svelte';} },
+    "SidebarNavigationActions: imports dos modais"
+);
 
-	interface Props {
-		class?: string;
-		isExpandedMode?: boolean;
-		isOnMobile?: boolean;
-		onSearchClick?: () => void;
-		onNewChat?: () => void;
-		handleMobileSidebarItemClick: () => void;
-		isSearchModeActive: boolean;
-		searchQuery: string;
-		isCancelAlwaysVisible?: boolean;
-		onSearchDeactivated?: () => void;
-	}
+# ---- 4.1b estado + funcoes
+patch_file(
+    $sidebar_actions,
+    qr{\A((?:(?!let endpointsModalOpen)[\s\S])*?)\n</script>},
+    sub { $1 . q{
 
-	let {
-		class: className = '',
-		isExpandedMode = false,
-		isOnMobile = false,
-		onSearchClick,
-		onNewChat,
-		handleMobileSidebarItemClick,
-		isSearchModeActive = $bindable(),
-		searchQuery = $bindable(),
-		isCancelAlwaysVisible = false,
-		onSearchDeactivated
-	}: Props = $props();
+	// ---- customizacoes: modais de Endpoints / Usuarios / Servidores SSH ----
 
-	let searchInputRef = $state<HTMLInputElement | null>(null);
+	// Compat: em versoes antigas do componente isto era uma prop que fechava o
+	// drawer no celular ao clicar num item. O upstream atual nao expoe nada
+	// equivalente, entao vira no-op - os modais abrem por cima da sidebar.
+	function handleMobileSidebarItemClick() {}
+
 	let endpointsModalOpen = $state(false);
 	let usersModalOpen = $state(false);
 	let sshServersModalOpen = $state(false);
@@ -763,12 +795,6 @@ patch_file(
 	onMount(() => {
 		loadMe();
 	});
-
-	function handleSearchModeDeactivate() {
-		isSearchModeActive = false;
-		searchQuery = '';
-		onSearchDeactivated?.();
-	}
 
 	export function activateSearch() {
 		previewCoordinator.requestCloseAll();
@@ -972,60 +998,81 @@ patch_file(
   -H "Authorization: Bearer ${myToken || '<SEU_TOKEN>'}" \\
   -H "Content-Type: application/json" \\
   -d '{"model":"${firstModel}","messages":[{"role":"user","content":"Olá"}]}'`);
-</script>},
+</script>} },
     "SidebarNavigationActions: script com estado do modal"
 );
 
-# 4.2: Adicionar botao Endpoints DENTRO do grupo (mesmo espacamento dos outros)
-#       e o modal depois do grupo. O botao vai entre {/each} e {/if} pra ficar
-#       no mesmo container space-y-1 dos demais itens.
+# ---- 4.2a botoes COM TEXTO no branch expandido
 patch_file(
     $sidebar_actions,
-    qr{(\{/each\})(\s*\{/if\}\s*</div>)}s,
+    qr{(\{/each\})(\s*</div>\s*\{:else\})}s,
     sub { $1 . q{
+		<Button
+			class="w-full justify-between px-2 backdrop-blur-none! hover:[&>kbd]:opacity-100"
+			onclick={openEndpointsModal}
+			variant="ghost"
+		>
+			<div class="flex items-center gap-2">
+				<Plug class="h-4 w-4" />
+				Endpoints da API
+			</div>
+		</Button>
+		{#if isAdmin}
 			<Button
 				class="w-full justify-between px-2 backdrop-blur-none! hover:[&>kbd]:opacity-100"
-				onclick={openEndpointsModal}
+				onclick={openUsersModal}
 				variant="ghost"
 			>
 				<div class="flex items-center gap-2">
-					<Plug class="h-4 w-4" />
-					Endpoints da API
+					<UserPlus class="h-4 w-4" />
+					Usuários
 				</div>
 			</Button>
-			{#if isAdmin}
-				<Button
-					class="w-full justify-between px-2 backdrop-blur-none! hover:[&>kbd]:opacity-100"
-					onclick={openUsersModal}
-					variant="ghost"
-				>
-					<div class="flex items-center gap-2">
-						<UserPlus class="h-4 w-4" />
-						Usuários
-					</div>
-				</Button>
-			{/if}
-			<Button
-				class="w-full justify-between px-2 backdrop-blur-none! hover:[&>kbd]:opacity-100"
-				onclick={openSshServersModal}
-				variant="ghost"
-			>
-				<div class="flex items-center gap-2">
-					<Server class="h-4 w-4" />
-					Servidores SSH
-				</div>
+		{/if}
+		<Button
+			class="w-full justify-between px-2 backdrop-blur-none! hover:[&>kbd]:opacity-100"
+			onclick={openSshServersModal}
+			variant="ghost"
+		>
+			<div class="flex items-center gap-2">
+				<Server class="h-4 w-4" />
+				Servidores SSH
+			</div>
+		</Button>
+		<Button
+			class="w-full justify-between px-2 backdrop-blur-none! hover:[&>kbd]:opacity-100"
+			onclick={logout}
+			variant="ghost"
+		>
+			<div class="flex items-center gap-2">
+				<LogOut class="h-4 w-4" />
+				Sair
+			</div>
+		</Button>
+	} . $2 },
+    "SidebarNavigationActions: botoes com texto (menu expandido)"
+);
+
+# ---- 4.2b botoes SO ICONE no branch encolhido + modais no fim
+patch_file(
+    $sidebar_actions,
+    qr{(\{/each\})(\s*</div>\s*\{/if\}\s*)\z}s,
+    sub { $1 . q{
+		<Button class="h-9 w-9 p-0" onclick={openEndpointsModal} variant="ghost" title="Endpoints da API">
+			<Plug class="h-4 w-4" />
+		</Button>
+		{#if isAdmin}
+			<Button class="h-9 w-9 p-0" onclick={openUsersModal} variant="ghost" title="Usuários">
+				<UserPlus class="h-4 w-4" />
 			</Button>
-			<Button
-				class="w-full justify-between px-2 backdrop-blur-none! hover:[&>kbd]:opacity-100"
-				onclick={logout}
-				variant="ghost"
-			>
-				<div class="flex items-center gap-2">
-					<LogOut class="h-4 w-4" />
-					Sair
-				</div>
-			</Button>
-		} . $2 . q{
+		{/if}
+		<Button class="h-9 w-9 p-0" onclick={openSshServersModal} variant="ghost" title="Servidores SSH">
+			<Server class="h-4 w-4" />
+		</Button>
+		<Button class="h-9 w-9 p-0" onclick={logout} variant="ghost" title="Sair">
+			<LogOut class="h-4 w-4" />
+		</Button>
+	} . $2 . q{
 
 <!-- Modal de Endpoints -->
 <DialogPrimitive.Root bind:open={endpointsModalOpen}>
@@ -1253,7 +1300,7 @@ patch_file(
 	</DialogPrimitive.Portal>
 </DialogPrimitive.Root>
 } },
-    "SidebarNavigationActions: botao Endpoints + Criar usuario + Sair + Servidores SSH + modais"
+    "SidebarNavigationActions: botoes so icone (encolhido) + modais"
 );
 
 # 4.3: Reverter ChatScreenGreeting para versao traduzida sem painel
@@ -1283,27 +1330,43 @@ patch_file(
     "settings-registry: remove campo API Key"
 );
 
-# Confirmacao de excluir conversa: template literal com ${...} e aspas internas
+# Confirmacao de excluir conversa: template literal com ${...} e aspas internas.
+# O upstream ganhou window.confirm proprio, mas em ingles, e trocou a variavel
+# selectedConversationNamePreview por conversation.name -- aqui so traduzimos.
 my $sidebar_nav = "$webui_src/lib/components/app/navigation/SidebarNavigation/SidebarNavigation.svelte";
 patch_file(
     $sidebar_nav,
-    qr/`Are you sure you want to delete "\$\{selectedConversationNamePreview\}"\? This action cannot be undone and will permanently remove all messages in this conversation\.`/,
-    "`Tem certeza que deseja excluir \"\${selectedConversationNamePreview}\"? Esta ação não pode ser desfeita e removerá permanentemente todas as mensagens desta conversa.`",
+    qr/`Delete\s+"\$\{conversation\.name\}"\?\s*This action cannot be undone\.`/,
+    q{`Excluir "${conversation.name}"? Esta ação não pode ser desfeita.`},
     "SidebarNavigation: confirmacao de excluir conversa"
 );
 
-# Fechar preview ao expandir/colapsar o sidebar (toggle)
+# Fechar preview ao expandir/colapsar o sidebar (toggle).
+# O import direto do SidebarNavigationActions virou barrel import
+# ('$lib/components/app'), entao a ancora passou a ser o import de ROUTES.
 patch_file(
     $sidebar_nav,
-    qr/(import SidebarNavigationActions from '\.\/SidebarNavigationActions\.svelte';)/,
+    qr/(import \{\s*ROUTES\s*\} from '\$lib\/constants';)(?!\s*import \{ previewCoordinator \})/,
     sub { "$1\n\timport { previewCoordinator } from '\$lib/stores/preview-coordinator.svelte';" },
     "SidebarNavigation: importa previewCoordinator"
 );
+# Sidebar.useSidebar() nao existe mais: o estado agora eh o local isExpandedMode.
+# Observar isExpandedMode cobre o toggle manual E as mudancas programaticas
+# (alwaysShowSidebarOnDesktop, hash SEARCH no mobile, scheduleMobileCollapse).
 patch_file(
     $sidebar_nav,
-    qr/(const sidebar = Sidebar\.useSidebar\(\);)/,
-    sub { "$1\n\t// Fecha o preview quando o sidebar eh expandido/colapsado\n\tlet lastSidebarOpenState = sidebar.open;\n\t\$effect(() => {\n\t\tif (sidebar.open !== lastSidebarOpenState) {\n\t\t\tlastSidebarOpenState = sidebar.open;\n\t\t\tpreviewCoordinator.requestCloseAll();\n\t\t}\n\t});" },
+    qr/(let isExpandedMode\s*=\s*\$state\(false\);)(?!\s*\/\/ Fecha o preview)/,
+    sub { "$1\n\t// Fecha o preview quando o sidebar eh expandido/colapsado\n\tlet lastSidebarOpenState = isExpandedMode;\n\t\$effect(() => {\n\t\tif (isExpandedMode !== lastSidebarOpenState) {\n\t\t\tlastSidebarOpenState = isExpandedMode;\n\t\t\tpreviewCoordinator.requestCloseAll();\n\t\t}\n\t});" },
     "SidebarNavigation: fecha preview ao toggle do sidebar"
+);
+
+# A tela de busca (rota nova) ganhou o MESMO confirm em ingles.
+my $search_page = "$webui_src/routes/search/+page.svelte";
+patch_file(
+    $search_page,
+    qr/`Delete\s+"\$\{conversation\.name\}"\?\s*This action cannot be undone\.`/,
+    q{`Excluir "${conversation.name}"? Esta ação não pode ser desfeita.`},
+    "search page: confirmacao de excluir conversa"
 );
 
 # Fechar preview ao abrir o menu "..." de acoes da conversa
@@ -1321,28 +1384,54 @@ patch_file(
     "ConversationItem: fecha preview ao abrir menu de acoes"
 );
 
-# Botao de raciocinio (ChatFormReasoningToggle): template literals
-my $reasoning_toggle = "$webui_src/lib/components/app/chat/ChatForm/ChatFormActions/ChatFormReasoningToggle.svelte";
-# tooltip: `${currentEffort} Reasoning`
+# Rotulos de raciocinio. O ChatFormReasoningToggle.svelte foi REMOVIDO do
+# upstream em f1161b15f (#25340, 2026-07-08): o botao dedicado de raciocinio
+# na barra do chat deixou de existir e virou submenu dentro do menu "+".
+# A logica comum (inclusive os rotulos de tokens) migrou para o hook
+# lib/hooks/use-reasoning-menu.svelte.ts.
+#
+# DESCARTADOS (as strings nao existem mais em lugar nenhum do upstream e nao
+# ha sucessor): o patch do tooltip `${currentEffort} Reasoning` e o do
+# aria-label `${tooltipText}. Click to configure.`.
+#
+# ATENCAO: NAO apontar patch para
+# ChatForm/ChatFormActions/ChatFormReasoningEffortSubmenu.svelte - ele contem
+# as mesmas strings mas e codigo morto (ninguem importa); o patch casaria,
+# imprimiria "+ ok" e mascararia a quebra real sem efeito nenhum na UI.
+my $reasoning_menu = "$webui_src/lib/hooks/use-reasoning-menu.svelte.ts";
+# `Max ${tokens.toLocaleString()} tokens`
 patch_file(
-    $reasoning_toggle,
-    qr/`\$\{currentEffort\} Reasoning`/,
-    "`Raciocínio \${currentEffort}`",
-    "ReasoningToggle: tooltip nivel de raciocinio"
+    $reasoning_menu,
+    qr/`Max\s+(\$\{[^}]+\})\s+tokens`/,
+    sub { "`Máx $1 tokens`" },
+    "reasoning-menu: max tokens"
 );
-# aria-label: `${tooltipText}. Click to configure.`
+# 'Unlimited' (nivel sem teto de tokens)
 patch_file(
-    $reasoning_toggle,
-    qr/`\$\{tooltipText\}\. Click to configure\.`/,
-    "`\${tooltipText}. Clique para configurar.`",
-    "ReasoningToggle: aria-label clique para configurar"
+    $reasoning_menu,
+    qr/(\?\s*)'Unlimited'/,
+    sub { "$1'Ilimitado'" },
+    "reasoning-menu: Unlimited"
 );
-# `Max ${...} tokens`
+
+# Rotulo "Reasoning" no submenu do desktop (menu "+")
+my $reasoning_submenu =
+    "$webui_src/lib/components/app/chat/ChatForm/ChatFormActions/ChatFormActionAdd/ChatFormActionAddReasoningSubmenu.svelte";
 patch_file(
-    $reasoning_toggle,
-    qr/`Max \$\{REASONING_EFFORT_TOKENS\[level\.value\]\.toLocaleString\(\)\} tokens`/,
-    "`Máx \${REASONING_EFFORT_TOKENS[level.value].toLocaleString()} tokens`",
-    "ReasoningToggle: max tokens"
+    $reasoning_submenu,
+    qr/(>\s*)Reasoning(\s*<)/,
+    sub { "$1Raciocínio$2" },
+    "ReasoningSubmenu: rotulo Raciocinio"
+);
+
+# Rotulo "Reasoning" no sheet do mobile (menu "+")
+my $chatform_add_sheet =
+    "$webui_src/lib/components/app/chat/ChatForm/ChatFormActions/ChatFormActionAdd/ChatFormActionAddSheet.svelte";
+patch_file(
+    $chatform_add_sheet,
+    qr/(<span[^>]*class="[^"]*flex-1[^"]*"[^>]*>)\s*Reasoning\s*(<\/span>)/,
+    sub { "$1Raciocínio$2" },
+    "ChatFormActionAddSheet: rotulo Raciocinio"
 );
 
 # Labels dos niveis de raciocinio (reasoning-effort.ts) - patch direto pra
@@ -1429,53 +1518,64 @@ export const authStore = {
 };
 TS
 
-# 7.1: ui.ts — importa Wrench, adiciona campo adminOnly, item "Ferramentas"
-#       e marca "Settings" como adminOnly.
+# 7.1: ui.ts - importa Wrench, adiciona campo adminOnly, item "Ferramentas"
+#      e marca "Settings" como adminOnly.
+# O upstream reordenou os nomes do import lucide (alfabetica) e trocou
+# route/active* do item Settings, entao os regex casam por ESTRUTURA e nao
+# por texto literal. Todos idempotentes.
 my $ui_consts = "$webui_src/lib/constants/ui.ts";
+
 patch_file($ui_consts,
-    qr{import \{ Settings, Search, SquarePen \} from},
-    q{import { Settings, Search, SquarePen, Wrench } from},
+    qr{(import\s*\{(?![^\}]*\bWrench\b)[^\}]*?)\s*(\}\s*from\s*'\@lucide/svelte';)},
+    sub { "$1, Wrench $2" },
     "ui.ts: importa Wrench");
+
 patch_file($ui_consts,
-    qr{keys\?: string\[\];},
-    sub { "keys?: string[];\n\tadminOnly?: boolean;" },
+    qr{keys\?:\s*string\[\];(?!(?s:.*)adminOnly\?)},
+    sub { "keys?: string[];\n\t/** Item visivel apenas para admin (filtrado no menu lateral). */\n\tadminOnly?: boolean;" },
     "ui.ts: campo adminOnly na interface");
+
+# Insere o item "Ferramentas" antes do item Settings e marca Settings como
+# adminOnly, preservando os campos que o upstream definir no proprio item.
+# O (?!\},) impede a captura de atravessar a fronteira de outro objeto do
+# array: se o Settings deixar de ser o ultimo item, o patch NAO casa (falha
+# alta) em vez de corromper o arquivo.
 patch_file($ui_consts,
-    qr{\{\s*icon: Settings,\s*tooltip: 'Settings',\s*route: ROUTES\.SETTINGS,\s*activeRoutePrefix: '/settings'\s*\}\s*\];}s,
-    q{{
+    qr{(\{\s*icon:\s*Settings\b(?:(?!\},)(?!adminOnly).)*?)(\s*\}\s*\];)}s,
+    sub { q{{
 		icon: Wrench,
 		tooltip: 'Ferramentas',
-		route: '#/settings/tools'
+		route: `${ROUTES.SETTINGS}/tools`,
+		activeUrlIncludes: '#/settings/tools'
 	},
-	{
-		icon: Settings,
-		tooltip: 'Settings',
-		route: ROUTES.SETTINGS,
-		activeRoutePrefix: '/settings',
-		adminOnly: true
-	}
-];},
+	} . $1 . q{,
+		adminOnly: true} . $2 },
     "ui.ts: item Ferramentas + Settings adminOnly");
 
-# 7.2: DesktopIconStrip — filtra itens adminOnly por papel
-my $icon_strip = "$webui_src/lib/components/app/navigation/DesktopIconStrip.svelte";
-patch_file($icon_strip,
-    qr{import \{ useKeyboardShortcuts \} from '\$lib/hooks/use-keyboard-shortcuts\.svelte';},
-    sub { "import { useKeyboardShortcuts } from '\$lib/hooks/use-keyboard-shortcuts.svelte';\n\timport { authStore } from '\$lib/stores/auth.svelte';" },
-    "DesktopIconStrip: importa authStore");
-patch_file($icon_strip,
-    qr{let showIcons = \$derived\(!sidebarOpen\);},
-    sub { "let showIcons = \$derived(!sidebarOpen);\n\tconst visibleItems = \$derived(SIDEBAR_ACTIONS_ITEMS.filter((it) => !it.adminOnly || authStore.isAdmin));" },
-    "DesktopIconStrip: visibleItems por papel");
-patch_file($icon_strip,
-    qr{\{#each SIDEBAR_ACTIONS_ITEMS as item, i \(item\.tooltip\)\}},
-    q{{#each visibleItems as item, i (item.tooltip)}},
-    "DesktopIconStrip: each filtra por papel");
+# O item "MCP Servers" e novo no upstream e leva a configuracao global de
+# servidores MCP - mesma classe de risco do Settings. Fecha pra usuario comum.
+patch_file($ui_consts,
+    qr{(\{\s*icon:\s*McpLogo\b(?:(?!\},)(?!adminOnly).)*?)(\s*\},)}s,
+    sub { $1 . q{,
+		adminOnly: true} . $2 },
+    "ui.ts: MCP Servers adminOnly");
 
-# 7.3: SidebarNavigationActions — filtra itens adminOnly (isAdmin do script 4.1)
+# 7.2: DESCARTADO. O DesktopIconStrip.svelte foi deletado pelo upstream em
+#      ab6120cde (o strip de icones virou o branch {:else} deste mesmo
+#      SidebarNavigationActions.svelte). Os 3 patches que filtravam os itens
+#      por papel dentro do strip ficaram sem alvo; o filtro agora e feito de
+#      uma vez so pelo 7.3, cujo s///g cobre os DOIS {#each} do componente.
+#      Tambem nao ha mais motivo pra importar o authStore la: o script do
+#      4.1b ja define isAdmin a partir do /gw/me (fonte unica de verdade).
+
+# ---- 7.3 filtro por papel
 patch_file($sidebar_actions,
-    qr{\{#each SIDEBAR_ACTIONS_ITEMS as item \(item\.route\)\}},
-    q{{#each SIDEBAR_ACTIONS_ITEMS.filter((it) => !it.adminOnly || isAdmin) as item (item.route)}},
+    qr{(const isAdmin = \$derived\(me\?\.role === 'admin'\);)(?!\s*const visibleActionItems)},
+    sub { $1 . "\n\tconst visibleActionItems = \$derived(\n\t\tSIDEBAR_ACTIONS_ITEMS.filter((it) => !it.adminOnly || isAdmin)\n\t);" },
+    "SidebarNavigationActions: visibleActionItems por papel");
+patch_file($sidebar_actions,
+    qr{\{#each\s+SIDEBAR_ACTIONS_ITEMS\s+as\s+(item[^)]*\([^)]*\))\s*\}},
+    sub { "{#each visibleActionItems as $1}" },
     "SidebarNavigationActions: each filtra por papel");
 
 # 7.4: SettingsChat — usuario comum ve so a secao Ferramentas
@@ -1542,25 +1642,36 @@ export const sidebarPanels = {
 };
 TS
 
-# DesktopIconStrip: importa o store-ponte + os icones dos botoes customizados
-patch_file($icon_strip,
-    qr{import \{ authStore \} from '\$lib/stores/auth\.svelte';},
-    sub { "import { authStore } from '\$lib/stores/auth.svelte';\n\timport { sidebarPanels } from '\$lib/stores/sidebar-panels.svelte';\n\timport { Plug, UserPlus, Server, LogOut } from '\@lucide/svelte';" },
-    "DesktopIconStrip: importa store-ponte + icones");
+# DESCARTADOS: os 2 patches que injetavam os botoes no DesktopIconStrip
+# (importar store-ponte + icones, e inserir Endpoints/Usuarios/SSH/Sair depois
+# do loop). O arquivo nao existe mais, e o branch {:else} do
+# SidebarNavigationActions -- que é o antigo icon strip -- ja recebe os botoes
+# SO ICONE pelo patch 4.2b la em cima. Reinjetar aqui duplicaria os botoes.
+#
+# O write_file do sidebar-panels.svelte.ts acima CONTINUA necessario: o
+# script montado pelo 4.1a ainda importa esse store (os 3 $effect de sinal
+# ficaram inertes, mas o import precisa resolver ou o build quebra).
 
-# DesktopIconStrip: Endpoints / Usuarios(admin) / Servidores SSH / Sair apos o loop
-patch_file($icon_strip,
-    qr{(\{/each\})(\s*</div>\s*</aside>)}s,
-    sub { $1 . q{
-				{#if showIcons}
-					<ActionIcon icon={Plug} tooltip="Endpoints da API" tooltipSide={TooltipSide.RIGHT} size="lg" iconSize="h-4 w-4" class="h-9 w-9 rounded-full hover:bg-accent!" onclick={() => sidebarPanels.openEndpoints()} />
-					{#if authStore.isAdmin}
-						<ActionIcon icon={UserPlus} tooltip="Usuários" tooltipSide={TooltipSide.RIGHT} size="lg" iconSize="h-4 w-4" class="h-9 w-9 rounded-full hover:bg-accent!" onclick={() => sidebarPanels.openUsers()} />
-					{/if}
-					<ActionIcon icon={Server} tooltip="Servidores SSH" tooltipSide={TooltipSide.RIGHT} size="lg" iconSize="h-4 w-4" class="h-9 w-9 rounded-full hover:bg-accent!" onclick={() => sidebarPanels.openSshServers()} />
-					<ActionIcon icon={LogOut} tooltip="Sair" tooltipSide={TooltipSide.RIGHT} size="lg" iconSize="h-4 w-4" class="h-9 w-9 rounded-full hover:bg-accent!" onclick={() => { if (typeof window !== 'undefined') window.location.href = '/logout'; }} />
-				{/if}
-			} . $2 },
-    "DesktopIconStrip: botoes Endpoints/Usuarios/Servidores/Sair no encolhido");
+# ===========================================================================
+# Resumo final: qualquer patch CRITICO que nao casou quebra o build.
+# ===========================================================================
 
-print "\nCustomizacoes aplicadas.\n";
+print "\n";
+print "-" x 60, "\n";
+printf "%d aplicados, %d falharam\n", $applied, $failed;
+if (@skipped_optional) {
+    printf "%d opcionais ignorados: %s\n",
+        scalar(@skipped_optional), join(', ', @skipped_optional);
+}
+
+if ($failed) {
+    print STDERR "\nPATCHES CRITICOS QUE NAO CASARAM:\n";
+    print STDERR "  - $_\n" for @failures;
+    print STDERR "\nO upstream mudou. Corrija o customizations/apply.pl antes de\n";
+    print STDERR "publicar - a imagem sairia degradada (WebUI sem traducao, sem\n";
+    print STDERR "botoes de gestao ou sem controle de acesso admin/usuario).\n";
+    exit 1;
+}
+
+print "Customizacoes aplicadas.\n";
+exit 0;
