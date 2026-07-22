@@ -1023,6 +1023,64 @@ func paramString(m map[string]any, key string) string {
 }
 
 // sshExec runs a command on a remote host over SSH using password auth, via
+// Limits for ssh_exec output. Shell output is verbose and goes into the model's
+// history *whole*, where it stays for the rest of the conversation: every token
+// generated afterwards pays the cost of re-reading it.
+//
+// On the CPU box that is expensive. Generation there is memory-bandwidth bound
+// and slows down as the KV cache fills — measured on this hardware: -39% with
+// 16k tokens resident, -67% with 32k. The previous limit here was 100_000
+// characters, roughly 25k tokens: a single `journalctl` or `ls -laR` could eat
+// more than a third of a 64k context and drag down every later reply.
+//
+// 8000 characters is about 2000 tokens, enough to carry a real answer without
+// dominating the context.
+const (
+	sshOutputMaxBytes  = 8000
+	sshOutputHeadLines = 40
+	sshOutputTailLines = 25
+)
+
+// truncateSSHOutput shortens command output while keeping what matters.
+//
+// It preserves the HEAD and the TAIL rather than just cutting at a byte offset:
+// the beginning carries headers and first results, and the end carries the error
+// message or summary — which is usually the whole point of running the command.
+// A plain prefix cut throws away exactly the part that explains the failure.
+//
+// The marker left in the middle states how much was dropped, so the model knows
+// there is more and can ask for a narrower command (grep/head/tail) instead of
+// assuming it saw everything.
+func truncateSSHOutput(s string) string {
+	if len(s) <= sshOutputMaxBytes {
+		return s
+	}
+
+	lines := strings.Split(s, "\n")
+	if len(lines) > sshOutputHeadLines+sshOutputTailLines {
+		omitted := len(lines) - sshOutputHeadLines - sshOutputTailLines
+		s = strings.Join(lines[:sshOutputHeadLines], "\n") +
+			fmt.Sprintf("\n\n...[omitidas %d linhas do meio; refine o comando com grep/head/tail para ver o trecho que falta]...\n\n", omitted) +
+			strings.Join(lines[len(lines)-sshOutputTailLines:], "\n")
+		if len(s) <= sshOutputMaxBytes {
+			return s
+		}
+		// Few lines but very long ones (a single-line JSON dump, a minified
+		// file): the line-based cut was not enough, fall through to bytes.
+	}
+
+	// Byte-level cut, still keeping both ends. Uses the current s, so output
+	// that already went through the line cut above is shortened further rather
+	// than restarting from the original.
+	half := sshOutputMaxBytes / 2
+	if len(s) <= 2*half {
+		return s
+	}
+	return s[:half] +
+		fmt.Sprintf("\n\n...[omitidos %d caracteres do meio]...\n\n", len(s)-2*half) +
+		s[len(s)-half:]
+}
+
 // sshpass + the openssh client. Returns combined stdout+stderr.
 func sshExec(params map[string]any) (string, error) {
 	host := strings.TrimSpace(paramString(params, "host"))
@@ -1057,10 +1115,7 @@ func sshExec(params map[string]any) (string, error) {
 	c.Env = append(os.Environ(), "SSHPASS="+pass)
 	out, err := c.CombinedOutput()
 
-	s := string(out)
-	if len(s) > 100000 {
-		s = s[:100000] + "\n...[saída truncada]"
-	}
+	s := truncateSSHOutput(string(out))
 	if ctx.Err() == context.DeadlineExceeded {
 		return "", fmt.Errorf("conexão/comando SSH excedeu o limite de 90s")
 	}

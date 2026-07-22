@@ -422,3 +422,57 @@ func TestPersistenceReload(t *testing.T) {
 	}
 	_ = login(t, app2, "carol", "carolpass")
 }
+
+// Output from ssh_exec goes straight into the model's context and stays there,
+// so the truncation has to be tight AND has to keep the tail — the error
+// message at the end of a command is usually the reason it was run at all.
+func TestTruncateSSHOutput(t *testing.T) {
+	t.Run("saída curta passa intacta", func(t *testing.T) {
+		in := "total 4\ndrwxr-xr-x 2 root root 4096 Jul 22 12:00 etc\n"
+		if got := truncateSSHOutput(in); got != in {
+			t.Errorf("saída curta foi alterada:\n%q", got)
+		}
+	})
+
+	t.Run("muitas linhas: mantém cabeça e cauda", func(t *testing.T) {
+		var b strings.Builder
+		b.WriteString("PRIMEIRA LINHA\n")
+		for i := 0; i < 5000; i++ {
+			b.WriteString("linha de log irrelevante no meio do despejo\n")
+		}
+		b.WriteString("ERRO FATAL NA ULTIMA LINHA")
+
+		got := truncateSSHOutput(b.String())
+		if len(got) > sshOutputMaxBytes {
+			t.Errorf("passou do limite: %d > %d", len(got), sshOutputMaxBytes)
+		}
+		if !strings.Contains(got, "PRIMEIRA LINHA") {
+			t.Error("perdeu o início")
+		}
+		// A cauda é o ponto: um corte por prefixo jogaria fora justamente o erro.
+		if !strings.Contains(got, "ERRO FATAL NA ULTIMA LINHA") {
+			t.Error("perdeu o fim, que é onde costuma estar o erro")
+		}
+		if !strings.Contains(got, "omitidas") {
+			t.Error("não sinalizou que houve omissão")
+		}
+	})
+
+	t.Run("linha única gigante ainda respeita o limite", func(t *testing.T) {
+		// Um JSON minificado não tem \n, então o corte por linhas não resolve.
+		got := truncateSSHOutput(strings.Repeat("x", 60000))
+		if len(got) > sshOutputMaxBytes+200 {
+			t.Errorf("linha única não foi cortada: %d bytes", len(got))
+		}
+		if !strings.Contains(got, "omitidos") {
+			t.Error("não sinalizou a omissão")
+		}
+	})
+
+	t.Run("saída exatamente no limite não é tocada", func(t *testing.T) {
+		in := strings.Repeat("a", sshOutputMaxBytes)
+		if got := truncateSSHOutput(in); got != in {
+			t.Errorf("cortou no limite exato: %d bytes", len(got))
+		}
+	})
+}
