@@ -692,6 +692,11 @@ patch_file(
 	import { sidebarPanels } from '$lib/stores/sidebar-panels.svelte';
 
 	interface Props {
+		class?: string;
+		isExpandedMode?: boolean;
+		isOnMobile?: boolean;
+		onSearchClick?: () => void;
+		onNewChat?: () => void;
 		handleMobileSidebarItemClick: () => void;
 		isSearchModeActive: boolean;
 		searchQuery: string;
@@ -700,6 +705,11 @@ patch_file(
 	}
 
 	let {
+		class: className = '',
+		isExpandedMode = false,
+		isOnMobile = false,
+		onSearchClick,
+		onNewChat,
 		handleMobileSidebarItemClick,
 		isSearchModeActive = $bindable(),
 		searchQuery = $bindable(),

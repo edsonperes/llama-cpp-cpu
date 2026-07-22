@@ -89,6 +89,11 @@ cmake --build build --config Release -j"$JOBS" >/dev/null
 echo "  compilado"
 
 # --- 5) instalar binarios ---------------------------------------------------
+# ATENCAO: a WebUI NAO fica no binario llama-server (que tem ~8KB e e so um
+# wrapper) — ela e compilada dentro de libllama-server-impl.so. Por isso o build
+# acima nao pode usar --target llama-server: se so esse target for reconstruido,
+# a lib com a UI continua velha e o servidor segue servindo o bundle antigo.
+# Sempre rebuilde tudo e recopie TODAS as libs junto com o binario.
 log "Instalando em ${PREFIX}..."
 mkdir -p "$PREFIX/bin" "$PREFIX/lib" "$PREFIX/models" "$PREFIX/auth"
 for b in llama-server llama-bench llama-cli; do
