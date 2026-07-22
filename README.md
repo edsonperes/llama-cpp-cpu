@@ -4,24 +4,46 @@ llama.cpp **CPU-only** (AVX-512) para rodar em container LXC no Proxmox, com Web
 em português e login por usuário/senha.
 
 Feito para servidores **Xeon Scalable sem GPU** — onde a resposta certa não é
-"rodar um modelo pequeno", e sim **rodar um MoE grande**.
+"rodar o maior modelo que couber", e sim **rodar um MoE com poucos parâmetros
+ativos**.
 
 ---
 
-## Por que MoE (e só MoE)
+## O que decide a velocidade (e não é o tamanho do arquivo)
 
-Em CPU, a velocidade de geração é limitada pela **banda de memória**: o que manda
-é quantos GB precisam ser lidos a cada token.
+Em CPU a geração é limitada pela **banda de memória**. O que manda não é quantos
+parâmetros o modelo tem, é quantos GB são lidos **a cada token**:
 
-| Tipo | Exemplo | GB lidos por token | Velocidade típica |
-|---|---|---|---|
-| Denso | Llama-70B Q4 (42 GB) | **42 GB** | ~1,5 tok/s ❌ |
-| **MoE** | Qwen3.6-35B-A3B Q4 (22 GB) | **~1,9 GB** | **~15-20 tok/s** ✅ |
-| **MoE** | gpt-oss-120b MXFP4 (63 GB) | **~2,7 GB** | **~10-14 tok/s** ✅ |
+$$\text{tok/s} \approx \frac{\text{banda efetiva}}{\text{GB lidos por token}}$$
 
-Um MoE de 35B tem capacidade parecida com um denso de 27-32B e roda **6-8× mais
-rápido** nesse hardware. Um MoE de 120B — quase 2× maior que o Llama-70B em disco —
-roda **~10× mais rápido** que ele. Modelo denso grande é a categoria errada aqui.
+Num MoE só os experts ativos são lidos; num denso, o arquivo inteiro. Daí a regra
+central: **o que importa são os parâmetros ATIVOS**.
+
+Medido neste hardware (2× Xeon Gold 6138, 20 cores utilizáveis, sem GPU), mesmo
+`llama-bench` para todos, tool calling verificado de verdade em cada um:
+
+| Modelo | Ativos | Geração | Prefill | Arquivo |
+|---|---|---|---|---|
+| **LFM2.5-8B-A1B** | **1B** | **42,6 tok/s** | **148,6** | 4,8 GB |
+| Gemma 4 E2B QAT | ~2B | 25,1 | 121,1 | 3,1 GB |
+| Agents-A1-4B Q4_K_M | 4B (denso) | 13,8 | 72,0 | 2,7 GB |
+| Qwen3.6-35B-A3B | 3B | 11,0 | 50,0 | 20,8 GB |
+
+Três coisas que a intuição erra, todas confirmadas por medição:
+
+1. **Maior é mais lento.** O modelo de 20,8 GB perde do de 4,8 GB por quase 4×.
+   `gpt-oss-120b` foi descartado sem baixar: 5,1B ativos dariam ~4 tok/s.
+2. **A quantização pesa mais que o tamanho.** O mesmo Agents-A1-4B faz 13,8 tok/s
+   em Q4_K_M e **9,0 em Q8_0** — nessa versão, um arquivo 5× menor ficou mais
+   lento que o MoE de 35B.
+3. **Há duas bandas, não uma.** MoE alcança ~22 GB/s e denso ~37 GB/s no mesmo
+   hardware: escolher 8 experts entre 256 é acesso aleatório, e o prefetcher da
+   CPU não ajuda. Usar a banda de um regime para prever o outro erra por ~2×.
+
+Além dos ativos, duas propriedades ajudam muito: **arquitetura híbrida** (só
+parte das camadas tem KV cache, o que barateia contexto longo) e **handler
+dedicado de tool call** no llama.cpp, mais confiável que o autoparser genérico.
+O LFM2.5 tem as duas.
 
 ---
 
@@ -68,8 +90,11 @@ configuração padrão.
 
 ## Contexto: o que custa de verdade
 
-O KV cache é barato: **20.480 bytes/token**, então 64k ocupa 1,34 GB de um limite
-de 100 GB. RAM nunca é o fator limitante. O que pesa é tempo:
+O KV cache é barato: **20.480 bytes/token** (medido no Qwen3.6-35B-A3B, o modelo
+anterior), então 64k ocupa 1,34 GB de um limite de 100 GB. RAM nunca é o fator
+limitante. O que pesa é tempo — os números abaixo são daquele modelo; o LFM2.5
+atual é ~4× mais rápido, então as esperas caem na mesma proporção, mas o formato
+da curva é o mesmo:
 
 | Prompt | Espera pelo 1º token | Geração com o KV nesse tamanho |
 |---|---|---|
