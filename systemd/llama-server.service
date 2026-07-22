@@ -39,6 +39,7 @@ Environment=LD_LIBRARY_PATH=/opt/llama/lib
 ExecStart=/usr/bin/numactl --cpunodebind=${NUMA_NODE} --membind=${NUMA_NODE} \
     /opt/llama/bin/llama-server \
     --model ${MODEL} \
+    --alias ${MODEL_ALIAS} \
     --threads ${THREADS} \
     --threads-batch ${THREADS_BATCH} \
     --ctx-size ${CTX_SIZE} \

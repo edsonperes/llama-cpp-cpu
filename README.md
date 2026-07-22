@@ -31,7 +31,7 @@ roda **~10× mais rápido** que ele. Modelo denso grande é a categoria errada a
 git clone https://github.com/edsonperes/llama-cpp-cpu.git
 cd llama-cpp-cpu
 ./scripts/install.sh                    # compila com AVX-512 nativo
-./scripts/fetch-model.sh qwen3.6-35b    # baixa o modelo
+./scripts/fetch-model.sh lfm2.5-8b       # baixa o modelo
 cp llama.env.example /opt/llama/llama.env
 $EDITOR /opt/llama/llama.env            # troque a senha do admin!
 cp systemd/*.service /etc/systemd/system/
