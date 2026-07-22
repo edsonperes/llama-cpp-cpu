@@ -1,0 +1,38 @@
+[Unit]
+Description=llama.cpp server (CPU-only, AVX-512, MoE)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/opt/llama/llama.env
+
+# numactl prende o processo a UM no NUMA. Isso e essencial num servidor de 2
+# sockets: acesso cross-socket via UPI derruba a banda de memoria, que e o
+# gargalo da geracao em CPU. Medicoes publicas mostram dual-socket indo de +8%
+# a -70% na geracao — nao vale o risco como padrao.
+# Rode o benchmark (scripts/bench.sh) antes de considerar mudar isso.
+ExecStart=/usr/bin/numactl --cpunodebind=${NUMA_NODE} --membind=${NUMA_NODE} \
+    /opt/llama/bin/llama-server \
+    --model ${MODEL} \
+    --threads ${THREADS} \
+    --ctx-size ${CTX_SIZE} \
+    --numa numactl \
+    --no-mmap \
+    --host 127.0.0.1 --port 8081 \
+    ${EXTRA_ARGS}
+
+Environment=LD_LIBRARY_PATH=/opt/llama/lib
+WorkingDirectory=/opt/llama
+
+Restart=on-failure
+RestartSec=10
+# modelo grande demora a carregar do disco na primeira vez
+TimeoutStartSec=600
+
+# limites: MoE grande usa muita RAM residente (--no-mmap aloca de verdade)
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

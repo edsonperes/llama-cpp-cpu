@@ -1,0 +1,22 @@
+[Unit]
+Description=llama gateway (login + tokens por usuario + tool ssh_exec)
+After=llama-server.service
+Requires=llama-server.service
+
+[Service]
+Type=simple
+EnvironmentFile=/opt/llama/llama.env
+
+# O gateway e a unica porta publica (8080). Ele faz login com usuario/senha,
+# emite um token de API por usuario e faz proxy para o llama-server, que fica
+# escutando so em 127.0.0.1:8081 (sem autenticacao propria).
+ExecStart=/opt/llama/bin/gateway
+
+Environment=BACKEND_URL=http://127.0.0.1:8081
+WorkingDirectory=/opt/llama
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

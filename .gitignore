@@ -1,0 +1,6 @@
+build/
+*.gguf
+llama.env
+gateway/gateway
+gateway/llamagw
+node_modules/
