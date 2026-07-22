@@ -22,6 +22,16 @@ Environment=LD_LIBRARY_PATH=/opt/llama/lib
 # container, e nao por custo de sincronizacao via UPI. Para usar de fato os dois
 # sockets seria preciso reconfigurar os cores do LXC no host Proxmox.
 #
+# --kv-unified ANDA JUNTO com --parallel, nao e opcional. O help do llama.cpp diz
+# "default: enabled if number of slots is auto": ou seja, o KV unificado so liga
+# sozinho enquanto --parallel NAO e informado. Ao tornar --parallel explicito
+# voce sai do modo auto e o servidor passa a FATIAR o contexto entre os slots.
+# Medido aqui: com --ctx-size 65536 e --parallel 4 sem esta flag, o boot mostrou
+#   n_slots = 4, n_ctx_slot = 16384, kv_unified = 'false'
+# ou seja, cada conversa ficou com 16k -- METADE do que tinha antes de "melhorar"
+# a config. Com --kv-unified, os 4 slots dividem UM cache e cada conversa enxerga
+# o teto inteiro. Confira sempre a linha "initializing, n_slots=..." no boot.
+#
 # Todos os argumentos ficam explicitos abaixo. NAO reintroduzir uma variavel
 # tipo ${EXTRA_ARGS} com varios argumentos dentro: o systemd nao faz word
 # splitting em ${VAR}, entao a string inteira chega como UM argumento so e o
@@ -33,6 +43,7 @@ ExecStart=/usr/bin/numactl --cpunodebind=${NUMA_NODE} --membind=${NUMA_NODE} \
     --threads-batch ${THREADS_BATCH} \
     --ctx-size ${CTX_SIZE} \
     --parallel ${N_PARALLEL} \
+    --kv-unified \
     --numa numactl \
     --no-mmap \
     --jinja \
