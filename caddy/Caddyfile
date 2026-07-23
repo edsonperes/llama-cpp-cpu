@@ -1,0 +1,58 @@
+# HTTPS na frente do gateway. O Caddy emite e RENOVA o certificado Let's Encrypt
+# sozinho -- nao ha cron nem certbot para lembrar de manter.
+#
+# Instalar:
+#   cp caddy/Caddyfile /etc/caddy/Caddyfile
+#   $EDITOR /etc/caddy/Caddyfile      # troque o dominio e o e-mail
+#   systemctl reload caddy
+#
+# Depois que isto estiver no ar, prenda o gateway ao localhost (GATEWAY_ADDR no
+# llama.env). Enquanto ele escutar em *:8080, a porta em texto claro continua
+# aberta e o HTTPS vira enfeite: quem souber a porta entra por fora dele.
+
+{
+	# E-mail de contato do Let's Encrypt: recebe aviso se a renovacao falhar.
+	# TROQUE pelo seu -- endereco invalido nao impede a emissao, mas voce fica
+	# sem o aviso quando algo quebrar.
+	email edson.c.peres@gmail.com
+}
+
+llm.agentsolutions.com.br {
+	reverse_proxy 127.0.0.1:8080 {
+		# TIMEOUTS LONGOS SAO OBRIGATORIOS AQUI, nao sao preciosismo.
+		# Inferencia em CPU e lenta: prefill medido neste servidor leva ~2,4 min
+		# para um prompt de 8k e ~12 min para 32k, tudo isso ANTES do primeiro
+		# byte de resposta. Com o timeout padrao de proxy, a requisicao morreria
+		# no meio e o usuario veria um 502 sem explicacao -- justamente nos
+		# prompts grandes, que sao os que mais custaram para processar.
+		transport http {
+			dial_timeout 10s
+			response_header_timeout 30m
+			read_timeout 30m
+			write_timeout 30m
+		}
+
+		# Streaming (SSE): a WebUI recebe a resposta token a token. Sem isto o
+		# Caddy poderia bufferizar e a resposta so apareceria no fim, de uma vez.
+		flush_interval -1
+
+		# O gateway loga e limita por IP; sem isto ele veria todo mundo como
+		# 127.0.0.1 e nao distinguiria os clientes.
+		header_up X-Real-IP {remote_host}
+	}
+
+	# HSTS: manda o navegador so voltar por HTTPS. Deixado COMENTADO de proposito
+	# -- uma vez que o navegador guarda esse cabecalho, ele recusa HTTP neste
+	# dominio pelo tempo declarado, e voltar atras exige limpar o estado em cada
+	# navegador. Ative so quando tiver certeza de que o HTTPS ficou.
+	# header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+	encode zstd gzip
+
+	# Log de acesso vai para o journald (o default do Caddy no Debian), lido com
+	#   journalctl -u caddy -f
+	# Nao escreva em /var/log/caddy: a unit do pacote roda com ProtectSystem=full
+	# e o servico falha ao subir com "permission denied" mesmo que o diretorio
+	# exista e pertenca ao usuario caddy. O journald ja rotaciona sozinho, entao
+	# arquivo proprio so adicionaria manutencao.
+}

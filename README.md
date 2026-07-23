@@ -201,14 +201,36 @@ cada mensagem, considere manter uma GPU para isso.
 ## Arquitetura
 
 ```
-   :8080  gateway (Go)  ──proxy──>  127.0.0.1:8081  llama-server
-           login/senha                              (sem auth própria,
-           token por usuário                         só escuta local)
-           tool ssh_exec
+  :443 HTTPS ──> 127.0.0.1:8080 ──proxy──> 127.0.0.1:8081
+  Caddy          gateway (Go)              llama-server
+  cert auto      login/senha               (sem auth própria)
+  :80 → :443     token por usuário
+                 tool ssh_exec
 ```
 
-O `llama-server` **nunca** é exposto direto: quem fala com a rede é o gateway,
-que faz a autenticação. Usuários e tokens ficam em `/opt/llama/auth/users.json`.
+Nada além de **80 e 443** é exposto: gateway e `llama-server` escutam só em
+localhost. O Caddy emite e renova o certificado Let's Encrypt sozinho — não há
+cron nem certbot para manter. Usuários e tokens ficam em
+`/opt/llama/auth/users.json`.
+
+### HTTPS
+
+```bash
+cp caddy/Caddyfile /etc/caddy/Caddyfile   # troque o domínio e o e-mail
+systemctl reload caddy
+```
+
+Dois detalhes que não são preciosismo:
+
+**Prenda o gateway ao localhost** (`LISTEN_ADDR=127.0.0.1:8080`). Enquanto ele
+escutar em `:8080`, a porta em texto claro continua aberta na internet e o HTTPS
+vira enfeite — quem usar `http://IP:8080` manda senha e token de API em texto
+puro pela rede, exatamente o que o certificado deveria ter resolvido.
+
+**Timeouts longos no proxy.** Inferência em CPU leva minutos: um prompt de 32k
+gasta ~12 min só de prefill, antes do primeiro byte de resposta. Com o timeout
+padrão a requisição morre no meio e o usuário vê um 502 sem explicação —
+justamente nos prompts grandes, que são os que mais custaram para processar.
 
 ---
 
