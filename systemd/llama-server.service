@@ -48,6 +48,10 @@ ExecStart=/usr/bin/numactl --cpunodebind=${NUMA_NODE} --membind=${NUMA_NODE} \
     --numa numactl \
     --no-mmap \
     --jinja \
+    --reasoning-format deepseek \
+    --temp ${TEMP} \
+    --top-k ${TOP_K} \
+    --repeat-penalty ${REPEAT_PENALTY} \
     --host 127.0.0.1 --port 8081
 
 WorkingDirectory=/opt/llama
